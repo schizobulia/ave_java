@@ -1,34 +1,89 @@
-name: GraalVM build
+name: Generate Executables
+# on:
+#   push:
+#     branches:
+#       - '*'
+#   pull_request:
+#   workflow_dispatch:
 on:
-  push:
-    branches:
-      - '*'
-  pull_request:
   workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
 
 jobs:
   build:
-    name: ${{ matrix.version }} on ${{ matrix.os }}
+    name: GraalVM on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
     strategy:
+      fail-fast: false
       matrix:
-        version: [ latest ]
-        os: [ macos-latest, windows-latest, ubuntu-latest ]
+        os: [macos-latest, windows-latest, ubuntu-latest]
+        include:
+            - os: ubuntu-latest
+              executable-suffix: '_sh'
+              native-build-args: --verbose -J-Xmx10g
+            - os: macos-latest
+              executable-suffix: ''
+              native-build-args: --verbose -J-Xmx13g
+            - os: windows-latest
+              executable-suffix: '.exe'
+              e2e: false
+              native-build-args: --verbose -J-Xmx10g
+
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
+
+      - id: executable
+        run: echo "::set-output name=name::ave_java-${{ runner.os }}-${{ github.event.release.tag_name || 'snapshot' }}-x86_64"
+      # - uses: actions/setup-node@v3
+      #     with:
+      #       node-version: 16.14.0
+
       - uses: graalvm/setup-graalvm@v1
         with:
-          version: ${{ matrix.version }}
-          java-version: '20'
-          components: 'native-image'
+          java-version: '17.0.7'
+          distribution: 'graalvm'
           github-token: ${{ secrets.GITHUB_TOKEN }}
+          native-image-job-reports: 'true'
+
       - name: Cache Maven packages
         uses: actions/cache@v2
         with:
           path: ~/.m2
           key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
           restore-keys: ${{ runner.os }}-m2
+
+      # - name: Cache npm dependencies
+      #   uses: actions/cache@v3
+      #   with:
+      #     path: ~/.npm
+      #     key: ${{ runner.os }}-npm-${{ hashFiles('**/package-lock.json') }}
+
+      # - run: npm install
+
       - name: Build with Maven
         run: mvn -DskipTests=true -Pnative -Dagent package
         env:
           NO_DOCKER: ${{ runner.os != 'Linux' }}
+  
+      - name: Archive binary
+        uses: actions/upload-artifact@v3
+        with:
+          name: ${{ steps.executable.outputs.name }}
+          path: target/${{ steps.executable.outputs.name }}${{ matrix.executable-suffix }}
+
+      - name: install dependencies (ubuntu only)
+        if: matrix.os == 'ubuntu-latest'
+        run: cp target/ave_java target/ave_java_sh
+
+      - name: Upload release
+        if: github.event.release.tag_name
+        run: gh release upload ${{ github.event.release.tag_name }} target/ave_java${{ matrix.executable-suffix }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
